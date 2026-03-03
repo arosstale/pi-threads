@@ -213,9 +213,14 @@ export class ThreadRegistry {
 	restore(threads: Thread[], stories: Story[]) {
 		for (const t of threads) {
 			this.threads.set(t.id, t);
+			// Advance ID counter past restored IDs to avoid collisions
+			const num = parseInt(t.id.replace("t-", ""), 10);
+			if (!isNaN(num) && num >= nextThreadId) nextThreadId = num + 1;
 		}
 		for (const s of stories) {
 			this.stories.set(s.id, s);
+			const num = parseInt(s.id.replace("s-", ""), 10);
+			if (!isNaN(num) && num >= nextStoryId) nextStoryId = num + 1;
 		}
 	}
 

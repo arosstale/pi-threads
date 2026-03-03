@@ -4,10 +4,8 @@
  *
  * Keys: ↑↓ navigate, Enter expand, k kill, r review, p prune, q/Esc close
  */
-import { Container, Text, Spacer, matchesKey, Key, truncateToWidth } from "@mariozechner/pi-tui";
-import { DynamicBorder } from "@mariozechner/pi-coding-agent";
+import { matchesKey, Key, truncateToWidth } from "@mariozechner/pi-tui";
 import type { ThreadRegistry } from "./core/registry.js";
-import type { Thread, Story, ThreadSummary } from "./core/types.js";
 
 export interface DashboardTheme {
 	fg: (color: string, text: string) => string;
@@ -32,7 +30,6 @@ export function createDashboard(
 	let expanded: string | null = null;
 	let rows: DashboardRow[] = [];
 	let cachedWidth: number | undefined;
-	let cachedLines: string[] | undefined;
 
 	function stateIcon(state: string): string {
 		switch (state) {
@@ -215,7 +212,6 @@ export function createDashboard(
 
 		invalidate() {
 			cachedWidth = undefined;
-			cachedLines = undefined;
 		},
 	};
 

@@ -88,10 +88,6 @@ export default function (pi: ExtensionAPI) {
 		return tasks;
 	}
 
-	function pad(s: string, n: number): string {
-		return s.length >= n ? s.slice(0, n) : s + " ".repeat(n - s.length);
-	}
-
 	function stateIcon(state: string): string {
 		switch (state) {
 			case "running": return "⟳";
