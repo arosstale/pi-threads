@@ -46,16 +46,26 @@ export class ThreadExecutor {
 		await this.runTask(thread, thread.tasks[0]);
 	}
 
-	/** Execute a parallel thread — all tasks concurrently */
-	async execParallel(thread: Thread): Promise<void> {
-		this.registry.startThread(thread.id);
-		await Promise.allSettled(thread.tasks.map((task) => this.runTask(thread, task)));
+	/** Stagger launches to avoid OAuth lockfile races */
+	private async staggeredAll(thread: Thread, tasks: ThreadTask[], delayMs = 500): Promise<void> {
+		const promises: Promise<void>[] = [];
+		for (let i = 0; i < tasks.length; i++) {
+			if (i > 0) await new Promise((r) => setTimeout(r, delayMs));
+			promises.push(this.runTask(thread, tasks[i]));
+		}
+		await Promise.allSettled(promises);
 	}
 
-	/** Execute a fusion thread — same prompt to N agents, all concurrent */
+	/** Execute a parallel thread — all tasks concurrently (staggered) */
+	async execParallel(thread: Thread): Promise<void> {
+		this.registry.startThread(thread.id);
+		await this.staggeredAll(thread, thread.tasks);
+	}
+
+	/** Execute a fusion thread — same prompt to N agents (staggered) */
 	async execFusion(thread: Thread): Promise<void> {
 		this.registry.startThread(thread.id);
-		await Promise.allSettled(thread.tasks.map((task) => this.runTask(thread, task)));
+		await this.staggeredAll(thread, thread.tasks);
 	}
 
 	/** Execute a chained thread — sequential with optional checkpoints */
