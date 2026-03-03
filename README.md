@@ -7,6 +7,12 @@ Thread engineering for [pi](https://github.com/badlogic/pi-mono) — all 7 threa
 ## Install
 
 ```bash
+pi install npm:pi-thread-engine
+```
+
+Or from source:
+
+```bash
 pi install ./path/to/pi-threads
 ```
 
