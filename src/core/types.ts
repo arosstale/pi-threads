@@ -4,6 +4,9 @@ export type ThreadType = "base" | "parallel" | "chained" | "fusion" | "meta" | "
 /** Thread lifecycle states */
 export type ThreadState = "pending" | "running" | "paused" | "completed" | "failed" | "killed";
 
+/** How a thread is executed */
+export type ExecutionBackend = "subagent" | "native";
+
 /** A single unit of work within a thread */
 export interface ThreadTask {
 	id: string;
@@ -23,18 +26,18 @@ export interface ThreadTask {
 export interface ThreadConfig {
 	type: ThreadType;
 	tasks: ThreadTask[];
-	/** For chained threads: require human checkpoint between phases */
-	checkpoints?: boolean;
-	/** For fusion threads: number of agents to run */
-	count?: number;
-	/** For fusion threads: models to use */
+	/** Execution backend */
+	backend: ExecutionBackend;
+	/** For fusion threads: models to compete */
 	models?: string[];
-	/** For long threads: checkpoint interval in ms */
-	checkpointInterval?: number;
 	/** For zero threads: verification command */
 	verifyCommand?: string;
+	/** For chained threads: require human checkpoint between phases */
+	checkpoints?: boolean;
 	/** Working directory */
 	cwd?: string;
+	/** Subagent agent name to use (default: "worker") */
+	agent?: string;
 }
 
 /** A thread — the fundamental unit of tracked work */
@@ -52,14 +55,37 @@ export interface Thread {
 	duration?: number;
 }
 
+/** A story — a goal decomposed into thread phases */
+export interface Story {
+	id: string;
+	goal: string;
+	state: "planning" | "executing" | "verifying" | "done" | "failed";
+	phases: StoryPhase[];
+	createdAt: number;
+	completedAt?: number;
+	/** Verification command */
+	verify?: string;
+	/** Files changed */
+	artifacts: string[];
+}
+
+export interface StoryPhase {
+	name: string;
+	threadType: ThreadType;
+	threadId?: string;
+	state: ThreadState;
+	description: string;
+}
+
 /** Short status line for dashboard */
 export interface ThreadSummary {
 	id: string;
 	type: ThreadType;
 	label: string;
 	state: ThreadState;
-	progress: string; // e.g. "2/5 tasks"
-	elapsed: string; // e.g. "1m 23s"
+	progress: string;
+	elapsed: string;
+	backend: ExecutionBackend;
 }
 
 /** Thread event for state changes */
@@ -71,4 +97,8 @@ export type ThreadEvent =
 	| { type: "task_failed"; thread: Thread; task: ThreadTask }
 	| { type: "thread_completed"; thread: Thread }
 	| { type: "thread_failed"; thread: Thread }
-	| { type: "thread_killed"; thread: Thread };
+	| { type: "thread_killed"; thread: Thread }
+	| { type: "story_created"; story: Story }
+	| { type: "story_phase_started"; story: Story; phase: StoryPhase }
+	| { type: "story_completed"; story: Story }
+	| { type: "story_failed"; story: Story };

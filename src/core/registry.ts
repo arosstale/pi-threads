@@ -1,15 +1,18 @@
-import type { Thread, ThreadEvent, ThreadState, ThreadSummary, ThreadTask, ThreadType } from "./types.js";
+import type { ExecutionBackend, Story, StoryPhase, Thread, ThreadEvent, ThreadState, ThreadSummary, ThreadTask, ThreadType } from "./types.js";
 
 type EventHandler = (event: ThreadEvent) => void;
 
-let nextId = 1;
+let nextThreadId = 1;
+let nextStoryId = 1;
 
-/** Generate a thread ID like "t-001" */
-function genId(): string {
-	return `t-${String(nextId++).padStart(3, "0")}`;
+function genThreadId(): string {
+	return `t-${String(nextThreadId++).padStart(3, "0")}`;
 }
 
-/** Generate a task ID like "t-001.1" */
+function genStoryId(): string {
+	return `s-${String(nextStoryId++).padStart(3, "0")}`;
+}
+
 function genTaskId(threadId: string, index: number): string {
 	return `${threadId}.${index + 1}`;
 }
@@ -26,12 +29,12 @@ export function formatElapsed(ms: number): string {
 	return `${h}h ${m % 60}m`;
 }
 
-/** Central registry for all threads */
+/** Central registry for all threads and stories */
 export class ThreadRegistry {
 	private threads = new Map<string, Thread>();
+	private stories = new Map<string, Story>();
 	private handlers: EventHandler[] = [];
 
-	/** Subscribe to thread events */
 	on(handler: EventHandler): () => void {
 		this.handlers.push(handler);
 		return () => {
@@ -44,15 +47,19 @@ export class ThreadRegistry {
 		for (const h of this.handlers) {
 			try {
 				h(event);
-			} catch {
-				// swallow
-			}
+			} catch {}
 		}
 	}
 
-	/** Create and register a new thread */
-	create(type: ThreadType, label: string, prompts: string[], opts?: { models?: string[]; cwd?: string }): Thread {
-		const threadId = genId();
+	// ── Threads ──────────────────────────────────────────────────
+
+	create(
+		type: ThreadType,
+		label: string,
+		prompts: string[],
+		opts?: { models?: string[]; cwd?: string; backend?: ExecutionBackend; agent?: string; verify?: string }
+	): Thread {
+		const threadId = genThreadId();
 		const tasks: ThreadTask[] = prompts.map((prompt, i) => ({
 			id: genTaskId(threadId, i),
 			label: prompt.length > 60 ? prompt.slice(0, 57) + "..." : prompt,
@@ -66,7 +73,15 @@ export class ThreadRegistry {
 			type,
 			label,
 			state: "pending",
-			config: { type, tasks, cwd: opts?.cwd },
+			config: {
+				type,
+				tasks,
+				backend: opts?.backend ?? "native",
+				cwd: opts?.cwd,
+				models: opts?.models,
+				agent: opts?.agent,
+				verifyCommand: opts?.verify,
+			},
 			tasks,
 			createdAt: Date.now(),
 		};
@@ -76,22 +91,18 @@ export class ThreadRegistry {
 		return thread;
 	}
 
-	/** Get a thread by ID */
 	get(id: string): Thread | undefined {
 		return this.threads.get(id);
 	}
 
-	/** Get all threads */
 	all(): Thread[] {
 		return [...this.threads.values()];
 	}
 
-	/** Get threads by state */
 	byState(state: ThreadState): Thread[] {
 		return this.all().filter((t) => t.state === state);
 	}
 
-	/** Mark thread as started */
 	startThread(id: string) {
 		const t = this.threads.get(id);
 		if (!t) return;
@@ -100,7 +111,6 @@ export class ThreadRegistry {
 		this.emit({ type: "thread_started", thread: t });
 	}
 
-	/** Mark a task as started */
 	startTask(threadId: string, taskId: string, sessionId?: string) {
 		const t = this.threads.get(threadId);
 		if (!t) return;
@@ -112,7 +122,6 @@ export class ThreadRegistry {
 		this.emit({ type: "task_started", thread: t, task });
 	}
 
-	/** Mark a task as completed */
 	completeTask(threadId: string, taskId: string, result?: string) {
 		const t = this.threads.get(threadId);
 		if (!t) return;
@@ -123,7 +132,6 @@ export class ThreadRegistry {
 		if (result) task.result = result;
 		this.emit({ type: "task_completed", thread: t, task });
 
-		// Check if all tasks are done
 		if (t.tasks.every((tk) => tk.state === "completed")) {
 			t.state = "completed";
 			t.completedAt = Date.now();
@@ -132,7 +140,6 @@ export class ThreadRegistry {
 		}
 	}
 
-	/** Mark a task as failed */
 	failTask(threadId: string, taskId: string, error: string) {
 		const t = this.threads.get(threadId);
 		if (!t) return;
@@ -143,14 +150,24 @@ export class ThreadRegistry {
 		task.error = error;
 		this.emit({ type: "task_failed", thread: t, task });
 
-		// Thread fails if any task fails (can be more nuanced later)
-		t.state = "failed";
-		t.completedAt = Date.now();
-		t.duration = t.completedAt - (t.startedAt ?? t.createdAt);
-		this.emit({ type: "thread_failed", thread: t });
+		// For parallel/fusion: don't fail the whole thread if one task fails
+		if (t.type === "parallel" || t.type === "fusion") {
+			const allDone = t.tasks.every((tk) => tk.state === "completed" || tk.state === "failed");
+			if (allDone) {
+				const anySuccess = t.tasks.some((tk) => tk.state === "completed");
+				t.state = anySuccess ? "completed" : "failed";
+				t.completedAt = Date.now();
+				t.duration = t.completedAt - (t.startedAt ?? t.createdAt);
+				this.emit(anySuccess ? { type: "thread_completed", thread: t } : { type: "thread_failed", thread: t });
+			}
+		} else {
+			t.state = "failed";
+			t.completedAt = Date.now();
+			t.duration = t.completedAt - (t.startedAt ?? t.createdAt);
+			this.emit({ type: "thread_failed", thread: t });
+		}
 	}
 
-	/** Kill a thread and all its running tasks */
 	kill(id: string) {
 		const t = this.threads.get(id);
 		if (!t) return;
@@ -166,28 +183,89 @@ export class ThreadRegistry {
 		this.emit({ type: "thread_killed", thread: t });
 	}
 
-	/** Get summary for dashboard */
 	summarize(thread: Thread): ThreadSummary {
 		const done = thread.tasks.filter((t) => t.state === "completed").length;
+		const failed = thread.tasks.filter((t) => t.state === "failed").length;
 		const total = thread.tasks.length;
 		const elapsed = thread.startedAt ? formatElapsed(Date.now() - thread.startedAt) : "-";
+		const progress = failed > 0 ? `${done}/${total} (${failed}✗)` : `${done}/${total}`;
 
 		return {
 			id: thread.id,
 			type: thread.type,
 			label: thread.label,
 			state: thread.state,
-			progress: `${done}/${total}`,
+			progress,
 			elapsed,
+			backend: thread.config.backend,
 		};
 	}
 
-	/** Clear completed/failed/killed threads */
 	prune() {
 		for (const [id, t] of this.threads) {
 			if (t.state === "completed" || t.state === "failed" || t.state === "killed") {
 				this.threads.delete(id);
 			}
 		}
+	}
+
+	// ── Stories ──────────────────────────────────────────────────
+
+	createStory(goal: string, verify?: string): Story {
+		const story: Story = {
+			id: genStoryId(),
+			goal,
+			state: "planning",
+			phases: [],
+			createdAt: Date.now(),
+			verify,
+			artifacts: [],
+		};
+		this.stories.set(story.id, story);
+		this.emit({ type: "story_created", story });
+		return story;
+	}
+
+	getStory(id: string): Story | undefined {
+		return this.stories.get(id);
+	}
+
+	allStories(): Story[] {
+		return [...this.stories.values()];
+	}
+
+	addPhase(storyId: string, phase: StoryPhase) {
+		const s = this.stories.get(storyId);
+		if (!s) return;
+		s.phases.push(phase);
+	}
+
+	startPhase(storyId: string, phaseIndex: number, threadId: string) {
+		const s = this.stories.get(storyId);
+		if (!s || !s.phases[phaseIndex]) return;
+		s.phases[phaseIndex].state = "running";
+		s.phases[phaseIndex].threadId = threadId;
+		s.state = "executing";
+		this.emit({ type: "story_phase_started", story: s, phase: s.phases[phaseIndex] });
+	}
+
+	completePhase(storyId: string, phaseIndex: number) {
+		const s = this.stories.get(storyId);
+		if (!s || !s.phases[phaseIndex]) return;
+		s.phases[phaseIndex].state = "completed";
+
+		if (s.phases.every((p) => p.state === "completed")) {
+			s.state = "done";
+			s.completedAt = Date.now();
+			this.emit({ type: "story_completed", story: s });
+		}
+	}
+
+	failStory(storyId: string) {
+		const s = this.stories.get(storyId);
+		if (!s) return;
+		s.state = "failed";
+		s.completedAt = Date.now();
+		this.emit({ type: "story_failed", story: s });
 	}
 }

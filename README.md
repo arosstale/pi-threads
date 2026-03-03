@@ -1,79 +1,92 @@
 # 🧵 pi-threads
 
-Thread engineering for [pi](https://github.com/badlogic/pi-mono) — scale your agentic work with the 7 thread types.
+Thread engineering for [pi](https://github.com/badlogic/pi-mono) — all 7 thread types + stories.
+
+**Wraps pi-subagents** for P/C/B threads (inheriting agent specialization, chain artifacts, live progress). **Builds natively** what nobody else has: F-Thread (multi-model fusion), Z-Thread (verify gate), and Stories (goal → auto-decomposed thread phases).
 
 ## Install
 
 ```bash
-pi install path:~/Projects/pi-threads
+pi install ./path/to/pi-threads
 ```
 
-## Thread Types
+## Commands
 
-| Type | Command | What it does |
-|------|---------|--------------|
-| **P-Thread** | `/pthread` | N independent tasks in parallel |
-| **C-Thread** | `/cthread` | Sequential phases with human checkpoints |
-| **F-Thread** | `/fthread` | Same prompt to N agents, pick the best |
-| **B-Thread** | `/bthread` | Auto-decompose: scout → plan → build → review |
-| **L-Thread** | `/lthread` | Extended autonomous run |
-| **Z-Thread** | `/zthread` | Autonomous + verification, ships when tests pass |
+| Command | Type | Backend | What |
+|---------|------|---------|------|
+| `/pthread` | P-Thread | subagent | N independent tasks in parallel |
+| `/cthread` | C-Thread | subagent | Sequential phases via subagent chain |
+| `/bthread` | B-Thread | subagent | scout → plan → build → review pipeline |
+| `/fthread` | F-Thread | **native** | Same prompt → N models → compare (UNIQUE) |
+| `/zthread` | Z-Thread | **native** | Autonomous + verify command gate (UNIQUE) |
+| `/lthread` | L-Thread | native | Extended autonomous run |
+| `/story` | Stories | mixed | Auto-decompose goal into thread phases (UNIQUE) |
 
-## Usage
+## Unique Features (not in pi-subagents or pi-messenger)
 
-### Parallel — fire N independent tasks
+### Fusion (`/fthread`)
+Same prompt sent to multiple models in parallel. Compare results, pick the best.
+
 ```
-/pthread "fix the auth bug" "add unit tests for auth" "update auth docs"
-```
-
-### Fusion — N agents compete on the same problem
-```
-/fthread "Design the caching layer architecture" --count 5
-/fthread "Refactor the API" --models sonnet,gemini,gpt
+/fthread "Design the caching architecture" --count 5
+/fthread "Refactor the auth module" --models anthropic/claude-sonnet-4,google/gemini-2.5-pro,openai/gpt-4o
 ```
 
-### Chained — sequential with checkpoints
-```
-/cthread "migrate DB schema" "update ORM models" "run integration tests"
-```
+### Zero-Touch (`/zthread`)
+Autonomous execution with a verification gate. Only ships if the verify command passes.
 
-### Meta — automated scout → plan → build → review
-```
-/bthread "Add dark mode support to the dashboard"
-```
-
-### Zero-touch — autonomous with verification
 ```
 /zthread "Fix all ESLint warnings" --verify "npm run lint"
+/zthread "Add input validation" --verify "npm test"
 ```
+
+### Stories (`/story`)
+A goal gets auto-decomposed into thread phases. pi-threads picks the right thread type for each phase.
+
+```
+/story "Add dark mode to the dashboard" --verify "npm test"
+```
+
+Auto-generates phases:
+1. **Scout** (meta) — research the codebase
+2. **Plan** (fusion) — 3 models brainstorm approaches
+3. **Decide** (chained) — human picks the winner
+4. **Build** (parallel) — implement across files
+5. **Verify** (zero) — run tests
 
 ## Dashboard
 
 ```
-/threads          — show all threads
+/threads          — show all threads + stories
 /threads kill t-001 — kill a thread
-/threads review   — see completed results
+/threads review   — see completed results (fusion shows comparison)
 /threads prune    — clear finished threads
+/stories          — list all stories with phase progress
 ```
 
 ## LLM Tools
 
-The extension also registers tools the LLM can call directly:
-
-- `thread_spawn` — Start any thread type
-- `thread_status` — Check progress
+- `thread_spawn` — Start any thread type (auto-selects backend)
+- `thread_status` — Check progress of threads and stories
 - `thread_kill` — Stop a thread
 
-## How It Works
+## Architecture
 
-Each thread task spawns a `pi -p` subprocess. Tasks run in your current working directory with full tool access. Results are captured and stored in the thread registry.
-
-- **P-Threads**: All tasks run concurrently via `Promise.allSettled`
-- **C-Threads**: Tasks run sequentially, with `ctx.ui.confirm()` between each phase
-- **F-Threads**: Same as P-Thread but all tasks share the same prompt (optionally with different models)
-- **B-Threads**: 4 sequential phases: research, plan, implement, review
-- **L-Threads**: Single task with extended timeout (1 hour default)
-- **Z-Threads**: Single task + verification command must pass
+```
+Wrapper layer (pi-subagents):     Native layer (pi -p):
+┌──────────────────────────┐     ┌────────────────────────┐
+│ /pthread  → /parallel    │     │ /fthread  → N models   │
+│ /cthread  → /chain       │     │ /zthread  → run+verify │
+│ /bthread  → scout chain  │     │ /lthread  → long run   │
+└──────────────────────────┘     └────────────────────────┘
+                    ↕                        ↕
+              ┌─────────────────────────────────┐
+              │  ThreadRegistry (state machine)  │
+              │  ThreadExecutor (dispatch)        │
+              │  /threads dashboard               │
+              │  /story orchestrator              │
+              └─────────────────────────────────┘
+```
 
 ## The Thread Framework
 

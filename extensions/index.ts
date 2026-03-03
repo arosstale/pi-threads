@@ -4,128 +4,37 @@ import { StringEnum } from "@mariozechner/pi-ai";
 import { Text } from "@mariozechner/pi-tui";
 import { ThreadRegistry, formatElapsed } from "../src/core/registry.js";
 import { ThreadExecutor } from "../src/core/executor.js";
-import type { Thread, ThreadType } from "../src/core/types.js";
+import type { Thread, ThreadType, Story, StoryPhase } from "../src/core/types.js";
 
 export default function (pi: ExtensionAPI) {
 	const registry = new ThreadRegistry();
 	const executor = new ThreadExecutor(pi, registry);
 
-	// ── Status bar updates ───────────────────────────────────────
-	registry.on((event) => {
-		const running = registry.byState("running");
-		if (running.length > 0) {
-			const labels = running.map((t) => {
-				const sum = registry.summarize(t);
-				return `${t.type[0].toUpperCase()}:${sum.progress}`;
-			});
-			pi.events.emit("threads:status", labels.join(" | "));
-		} else {
-			pi.events.emit("threads:status", null);
-		}
-	});
+	// ── Status bar ───────────────────────────────────────────────
 
 	pi.on("session_start", async (_event, ctx) => {
-		// Update footer status when threads change
-		registry.on((event) => {
+		registry.on(() => {
 			const running = registry.byState("running");
-			if (running.length > 0) {
-				const parts = running.map((t) => {
-					const sum = registry.summarize(t);
-					return `🧵${sum.id} ${t.type[0].toUpperCase()}:${sum.progress}`;
-				});
-				ctx.ui.setStatus("pi-threads", parts.join(" "));
-			} else {
-				ctx.ui.setStatus("pi-threads", undefined);
+			const stories = registry.allStories().filter((s) => s.state === "executing" || s.state === "planning");
+			const parts: string[] = [];
+
+			if (stories.length > 0) {
+				parts.push(`📖${stories.length}`);
 			}
+			if (running.length > 0) {
+				parts.push(
+					...running.map((t) => {
+						const sum = registry.summarize(t);
+						return `🧵${sum.type[0].toUpperCase()}:${sum.progress}`;
+					})
+				);
+			}
+
+			ctx.ui.setStatus("pi-threads", parts.length > 0 ? parts.join(" ") : undefined);
 		});
 	});
 
-	// ── Dashboard rendering ──────────────────────────────────────
-
-	function renderDashboard(theme: any): Text {
-		const threads = registry.all();
-
-		if (threads.length === 0) {
-			return new Text(theme.fg("muted", "  No threads. Use /pthread, /fthread, etc. to start one."), 0, 0);
-		}
-
-		const lines: string[] = [];
-		lines.push(theme.bold("  🧵 Thread Dashboard"));
-		lines.push("");
-
-		// Header
-		const hdr = `  ${pad("ID", 7)} ${pad("Type", 10)} ${pad("State", 10)} ${pad("Progress", 10)} ${pad("Elapsed", 10)} Label`;
-		lines.push(theme.fg("muted", hdr));
-		lines.push(theme.fg("dim", "  " + "─".repeat(80)));
-
-		for (const t of threads) {
-			const sum = registry.summarize(t);
-			const stateColor = stateToColor(sum.state);
-			const typeIcon = typeToIcon(sum.type);
-
-			let line = `  ${theme.fg("accent", pad(sum.id, 7))} `;
-			line += `${pad(typeIcon + " " + sum.type, 10)} `;
-			line += `${theme.fg(stateColor, pad(sum.state, 10))} `;
-			line += `${pad(sum.progress, 10)} `;
-			line += `${theme.fg("muted", pad(sum.elapsed, 10))} `;
-			line += sum.label.length > 40 ? sum.label.slice(0, 37) + "..." : sum.label;
-			lines.push(line);
-
-			// Show task details for running threads
-			if (sum.state === "running") {
-				for (const task of t.tasks) {
-					const icon = task.state === "completed" ? "✓" : task.state === "running" ? "⟳" : task.state === "failed" ? "✗" : "·";
-					const taskColor = stateToColor(task.state);
-					lines.push(theme.fg(taskColor, `    ${icon} ${task.id}: ${task.label}`));
-				}
-			}
-		}
-
-		lines.push("");
-		lines.push(theme.fg("dim", "  /threads kill <id>  /threads review  /threads prune"));
-
-		return new Text(lines.join("\n"), 0, 0);
-	}
-
-	function pad(s: string, n: number): string {
-		return s.length >= n ? s.slice(0, n) : s + " ".repeat(n - s.length);
-	}
-
-	function stateToColor(state: string): string {
-		switch (state) {
-			case "running":
-				return "warning";
-			case "completed":
-				return "success";
-			case "failed":
-				return "error";
-			case "killed":
-				return "error";
-			default:
-				return "muted";
-		}
-	}
-
-	function typeToIcon(type: string): string {
-		switch (type) {
-			case "parallel":
-				return "⫘";
-			case "chained":
-				return "⟶";
-			case "fusion":
-				return "⊕";
-			case "meta":
-				return "◎";
-			case "long":
-				return "∞";
-			case "zero":
-				return "⊘";
-			default:
-				return "·";
-		}
-	}
-
-	// ── Parse quoted args: "task 1" "task 2" or plain words ──────
+	// ── Helpers ──────────────────────────────────────────────────
 
 	function parseTaskArgs(args: string): string[] {
 		const tasks: string[] = [];
@@ -137,109 +46,188 @@ export default function (pi: ExtensionAPI) {
 		return tasks;
 	}
 
-	// ── Commands ─────────────────────────────────────────────────
+	function pad(s: string, n: number): string {
+		return s.length >= n ? s.slice(0, n) : s + " ".repeat(n - s.length);
+	}
 
-	/** /threads — dashboard */
+	function stateIcon(state: string): string {
+		switch (state) {
+			case "running": return "⟳";
+			case "completed": return "✓";
+			case "failed": return "✗";
+			case "killed": return "☠";
+			case "pending": return "·";
+			default: return "?";
+		}
+	}
+
+	function stateColor(state: string): string {
+		switch (state) {
+			case "running": return "warning";
+			case "completed": return "success";
+			case "failed": case "killed": return "error";
+			default: return "muted";
+		}
+	}
+
+	function typeIcon(type: string): string {
+		switch (type) {
+			case "parallel": return "⫘";
+			case "chained": return "⟶";
+			case "fusion": return "⊕";
+			case "meta": return "◎";
+			case "long": return "∞";
+			case "zero": return "⊘";
+			default: return "·";
+		}
+	}
+
+	// ── /threads — unified dashboard ─────────────────────────────
+
 	pi.registerCommand("threads", {
-		description: "Thread dashboard — show/manage active threads",
+		description: "Thread dashboard — show/manage all threads and stories",
 		handler: async (args, ctx) => {
-			if (!args || args.trim() === "" || args.trim() === "status") {
-				// Show dashboard
+			const subcmd = args?.trim().split(/\s+/)[0] ?? "";
+			const rest = args?.trim().slice(subcmd.length).trim() ?? "";
+
+			if (!subcmd || subcmd === "status") {
 				const threads = registry.all();
-				if (threads.length === 0) {
-					ctx.ui.notify("No threads active. Use /pthread, /fthread, etc.", "info");
-				} else {
-					const lines: string[] = ["🧵 Thread Dashboard", ""];
-					for (const t of threads) {
-						const s = registry.summarize(t);
-						lines.push(`${s.id} [${s.type}] ${s.state} ${s.progress} (${s.elapsed}) — ${s.label}`);
-					}
-					ctx.ui.notify(lines.join("\n"), "info");
-				}
-				return;
-			}
+				const stories = registry.allStories();
 
-			const parts = args.trim().split(/\s+/);
-			const cmd = parts[0];
-			const id = parts[1];
-
-			if (cmd === "kill" && id) {
-				const t = registry.get(id);
-				if (!t) {
-					ctx.ui.notify(`Thread ${id} not found`, "error");
+				if (threads.length === 0 && stories.length === 0) {
+					ctx.ui.notify("No active threads or stories. Commands: /pthread /fthread /cthread /bthread /zthread /story", "info");
 					return;
 				}
-				registry.kill(id);
-				ctx.ui.notify(`Killed thread ${id}`, "warning");
+
+				const lines: string[] = ["🧵 Thread Dashboard", ""];
+
+				if (stories.length > 0) {
+					lines.push("📖 Stories:");
+					for (const s of stories) {
+						const phases = s.phases.map((p) => `${stateIcon(p.state)}${p.name}`).join(" → ");
+						lines.push(`  ${s.id} [${s.state}] ${s.goal.slice(0, 50)} — ${phases || "(planning...)"}`);
+					}
+					lines.push("");
+				}
+
+				if (threads.length > 0) {
+					lines.push("🧵 Threads:");
+					for (const t of threads) {
+						const s = registry.summarize(t);
+						const be = s.backend === "subagent" ? " [sub]" : "";
+						lines.push(`  ${s.id} ${typeIcon(s.type)} ${s.type} [${s.state}] ${s.progress} (${s.elapsed})${be} — ${s.label}`);
+					}
+				}
+
+				ctx.ui.notify(lines.join("\n"), "info");
 				return;
 			}
 
-			if (cmd === "prune") {
+			if (subcmd === "kill" && rest) {
+				const t = registry.get(rest);
+				if (!t) { ctx.ui.notify(`Thread ${rest} not found`, "error"); return; }
+				registry.kill(rest);
+				ctx.ui.notify(`Killed ${rest}`, "warning");
+				return;
+			}
+
+			if (subcmd === "prune") {
 				registry.prune();
 				ctx.ui.notify("Pruned finished threads", "info");
 				return;
 			}
 
-			if (cmd === "review") {
+			if (subcmd === "review") {
 				const completed = registry.byState("completed");
-				if (completed.length === 0) {
-					ctx.ui.notify("No completed threads to review", "info");
-					return;
-				}
+				if (completed.length === 0) { ctx.ui.notify("No completed threads to review", "info"); return; }
+
 				for (const t of completed) {
-					const results = t.tasks
-						.filter((tk) => tk.result)
-						.map((tk) => `── ${tk.id}: ${tk.label} ──\n${tk.result?.slice(0, 500)}`)
-						.join("\n\n");
-					ctx.ui.notify(`Thread ${t.id} results:\n${results}`, "info");
+					const lines: string[] = [`── Thread ${t.id} (${t.type}) ──`];
+
+					if (t.type === "fusion") {
+						// Fusion review: show all results side by side for comparison
+						lines.push("Fusion results — compare and pick the best:\n");
+						for (const tk of t.tasks) {
+							const modelTag = tk.model ? ` [${tk.model}]` : "";
+							lines.push(`═══ ${tk.id}${modelTag} (${tk.state}) ═══`);
+							lines.push(tk.result?.slice(0, 800) ?? tk.error ?? "(no output)");
+							lines.push("");
+						}
+					} else {
+						for (const tk of t.tasks) {
+							lines.push(`  ${stateIcon(tk.state)} ${tk.id}: ${tk.label}`);
+							if (tk.result) lines.push(`    ${tk.result.slice(0, 300)}`);
+							if (tk.error) lines.push(`    ERROR: ${tk.error.slice(0, 200)}`);
+						}
+					}
+
+					ctx.ui.notify(lines.join("\n"), "info");
 				}
 				return;
 			}
 
-			ctx.ui.notify(`Unknown subcommand: ${cmd}. Use: status, kill <id>, review, prune`, "error");
+			ctx.ui.notify(`Unknown: ${subcmd}. Use: status, kill <id>, review, prune`, "error");
 		},
 	});
 
-	/** /pthread — parallel thread */
+	// ── /pthread — parallel via subagent ─────────────────────────
+
 	pi.registerCommand("pthread", {
-		description: 'Parallel thread — run N tasks concurrently. Usage: /pthread "task 1" "task 2" "task 3"',
+		description: 'P-Thread: run N tasks in parallel via subagent. Usage: /pthread "task 1" "task 2" "task 3"',
 		handler: async (args, ctx) => {
-			if (!args?.trim()) {
-				ctx.ui.notify('Usage: /pthread "task 1" "task 2" "task 3"', "error");
-				return;
-			}
+			if (!args?.trim()) { ctx.ui.notify('Usage: /pthread "task 1" "task 2"', "error"); return; }
 			const tasks = parseTaskArgs(args);
-			if (tasks.length === 0) {
-				ctx.ui.notify("No tasks specified", "error");
-				return;
-			}
+			if (tasks.length === 0) { ctx.ui.notify("No tasks specified", "error"); return; }
 
 			const label = tasks.length === 1 ? tasks[0] : `${tasks.length} parallel tasks`;
-			const thread = registry.create("parallel", label, tasks, { cwd: ctx.cwd });
+			const thread = registry.create("parallel", label, tasks, { cwd: ctx.cwd, backend: "subagent" });
 
-			ctx.ui.notify(`🧵 P-Thread ${thread.id}: Dispatching ${tasks.length} task(s)...`, "info");
-
-			// Fire and forget — runs in background
-			executor.dispatch(thread).then(() => {
-				if (thread.state === "completed") {
-					ctx.ui.notify(`✅ P-Thread ${thread.id} completed! Use /threads review`, "info");
-				} else {
-					ctx.ui.notify(`❌ P-Thread ${thread.id} ${thread.state}`, "error");
-				}
-			});
+			ctx.ui.notify(`🧵 P-Thread ${thread.id}: Dispatching ${tasks.length} task(s) via subagent...`, "info");
+			executor.dispatch(thread);
 		},
 	});
 
-	/** /fthread — fusion thread */
+	// ── /cthread — chained via subagent ──────────────────────────
+
+	pi.registerCommand("cthread", {
+		description: 'C-Thread: sequential phases via subagent chain. Usage: /cthread "phase 1" "phase 2"',
+		handler: async (args, ctx) => {
+			if (!args?.trim()) { ctx.ui.notify('Usage: /cthread "phase 1" "phase 2"', "error"); return; }
+			const phases = parseTaskArgs(args);
+			if (phases.length < 2) { ctx.ui.notify("Need at least 2 phases", "error"); return; }
+
+			const thread = registry.create("chained", `Chain: ${phases.length} phases`, phases, { cwd: ctx.cwd, backend: "subagent" });
+
+			ctx.ui.notify(`🧵 C-Thread ${thread.id}: ${phases.length} phases via subagent chain...`, "info");
+			executor.dispatch(thread);
+		},
+	});
+
+	// ── /bthread — meta via subagent (scout→plan→build→review) ──
+
+	pi.registerCommand("bthread", {
+		description: "B-Thread: scout → plan → build → review via subagent. Usage: /bthread <goal>",
+		handler: async (args, ctx) => {
+			if (!args?.trim()) { ctx.ui.notify("Usage: /bthread <goal>", "error"); return; }
+
+			const thread = registry.create("meta", `Meta: ${args.slice(0, 40)}`, [args.trim()], { cwd: ctx.cwd, backend: "subagent" });
+
+			ctx.ui.notify(`🧵 B-Thread ${thread.id}: scout → plan → build → review...`, "info");
+			executor.dispatch(thread);
+		},
+	});
+
+	// ── /fthread — FUSION (native, multi-model) ──────────────────
+	// This is unique to pi-threads — no other extension does this
+
 	pi.registerCommand("fthread", {
-		description: 'Fusion thread — same prompt to N agents. Usage: /fthread "prompt" [--count N] [--models m1,m2]',
+		description: 'F-Thread: same prompt to N agents/models, compare results. Usage: /fthread "prompt" [--count N] [--models m1,m2,m3]',
 		handler: async (args, ctx) => {
 			if (!args?.trim()) {
-				ctx.ui.notify('Usage: /fthread "prompt" [--count 3] [--models sonnet,gemini]', "error");
+				ctx.ui.notify('Usage: /fthread "prompt" [--count 3] [--models sonnet,gemini,gpt]', "error");
 				return;
 			}
 
-			// Parse flags
 			let count = 3;
 			let models: string[] | undefined;
 			let prompt = args;
@@ -250,29 +238,31 @@ export default function (pi: ExtensionAPI) {
 				prompt = prompt.replace(countMatch[0], "").trim();
 			}
 
-			const modelsMatch = args.match(/--models\s+([\w,.-]+)/);
+			const modelsMatch = args.match(/--models\s+([\w/,.:@-]+)/);
 			if (modelsMatch) {
 				models = modelsMatch[1].split(",");
 				count = models.length;
 				prompt = prompt.replace(modelsMatch[0], "").trim();
 			}
 
-			// Strip quotes from prompt
 			prompt = prompt.replace(/^["']|["']$/g, "").trim();
-			if (!prompt) {
-				ctx.ui.notify("No prompt specified", "error");
-				return;
-			}
+			if (!prompt) { ctx.ui.notify("No prompt specified", "error"); return; }
 
-			// Create N copies of the same prompt
 			const prompts = Array(count).fill(prompt);
-			const thread = registry.create("fusion", `Fusion: ${prompt.slice(0, 40)}`, prompts, { models, cwd: ctx.cwd });
+			const modelList = models ?? Array(count).fill(undefined);
+			const thread = registry.create("fusion", `Fusion: ${prompt.slice(0, 40)}`, prompts, {
+				models: modelList,
+				cwd: ctx.cwd,
+				backend: "native",
+			});
 
-			ctx.ui.notify(`🧵 F-Thread ${thread.id}: ${count} agents competing on "${prompt.slice(0, 50)}"...`, "info");
+			const modelDesc = models ? models.join(", ") : `${count} agents (same model)`;
+			ctx.ui.notify(`🧵 F-Thread ${thread.id}: "${prompt.slice(0, 50)}" → ${modelDesc}`, "info");
 
+			// Fusion runs natively — fire and forget
 			executor.dispatch(thread).then(() => {
 				if (thread.state === "completed") {
-					ctx.ui.notify(`✅ F-Thread ${thread.id} completed! ${count} results ready. Use /threads review`, "info");
+					ctx.ui.notify(`✅ F-Thread ${thread.id} done! ${count} results. Use /threads review`, "info");
 				} else {
 					ctx.ui.notify(`❌ F-Thread ${thread.id} ${thread.state}`, "error");
 				}
@@ -280,86 +270,58 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	/** /cthread — chained thread */
-	pi.registerCommand("cthread", {
-		description: 'Chained thread — sequential phases. Usage: /cthread "phase 1" "phase 2" "phase 3"',
+	// ── /zthread — ZERO-TOUCH (native + verification) ────────────
+	// Unique to pi-threads — autonomous with verify gate
+
+	pi.registerCommand("zthread", {
+		description: 'Z-Thread: autonomous + verify. Usage: /zthread "prompt" --verify "npm test"',
 		handler: async (args, ctx) => {
 			if (!args?.trim()) {
-				ctx.ui.notify('Usage: /cthread "phase 1" "phase 2" "phase 3"', "error");
+				ctx.ui.notify('Usage: /zthread "prompt" --verify "npm test"', "error");
 				return;
 			}
 
-			const phases = parseTaskArgs(args);
-			if (phases.length < 2) {
-				ctx.ui.notify("Need at least 2 phases for a chained thread", "error");
-				return;
+			let prompt = args;
+			let verifyCommand: string | undefined;
+
+			const verifyMatch = args.match(/--verify\s+"([^"]+)"|--verify\s+'([^']+)'|--verify\s+(\S+)/);
+			if (verifyMatch) {
+				verifyCommand = verifyMatch[1] ?? verifyMatch[2] ?? verifyMatch[3];
+				prompt = prompt.replace(verifyMatch[0], "").trim();
 			}
+			prompt = prompt.replace(/^["']|["']$/g, "").trim();
 
-			const thread = registry.create("chained", `Chain: ${phases.length} phases`, phases, { cwd: ctx.cwd });
+			const thread = registry.create("zero", `Zero: ${prompt.slice(0, 40)}`, [prompt], {
+				cwd: ctx.cwd,
+				backend: "native",
+				verify: verifyCommand,
+			});
 
-			ctx.ui.notify(`🧵 C-Thread ${thread.id}: ${phases.length} phases with checkpoints...`, "info");
-
-			executor
-				.dispatch(thread, {
-					onCheckpoint: async (phase, task) => {
-						const proceed = await ctx.ui.confirm(
-							`Phase ${phase + 1} checkpoint`,
-							`Phase ${phase} done. Proceed to: "${task.prompt.slice(0, 80)}"?`
-						);
-						return proceed;
-					},
-				})
-				.then(() => {
-					if (thread.state === "completed") {
-						ctx.ui.notify(`✅ C-Thread ${thread.id} all phases done!`, "info");
-					} else if (thread.state !== "killed") {
-						ctx.ui.notify(`❌ C-Thread ${thread.id} ${thread.state}`, "error");
-					}
-				});
-		},
-	});
-
-	/** /bthread — meta thread (scout → plan → build → review) */
-	pi.registerCommand("bthread", {
-		description: "Meta thread — auto-decompose into scout → plan → build → review",
-		handler: async (args, ctx) => {
-			if (!args?.trim()) {
-				ctx.ui.notify("Usage: /bthread <description of feature/task>", "error");
-				return;
-			}
-
-			const prompt = args.trim();
-			const phases = [
-				`Research and scout: ${prompt}. List files involved, patterns used, and constraints.`,
-				`Create a detailed implementation plan for: ${prompt}. Based on the codebase research.`,
-				`Implement the plan for: ${prompt}. Follow the plan precisely.`,
-				`Review the implementation of: ${prompt}. Check for bugs, edge cases, and style.`,
-			];
-
-			const thread = registry.create("meta", `Meta: ${prompt.slice(0, 40)}`, phases, { cwd: ctx.cwd });
-
-			ctx.ui.notify(`🧵 B-Thread ${thread.id}: scout → plan → build → review for "${prompt.slice(0, 50)}"...`, "info");
+			const verifyDesc = verifyCommand ? ` → verify: ${verifyCommand}` : "";
+			ctx.ui.notify(`🧵 Z-Thread ${thread.id}: "${prompt.slice(0, 50)}"${verifyDesc}`, "info");
 
 			executor.dispatch(thread).then(() => {
 				if (thread.state === "completed") {
-					ctx.ui.notify(`✅ B-Thread ${thread.id} complete! Full pipeline done.`, "info");
+					ctx.ui.notify(`✅ Z-Thread ${thread.id} shipped!${verifyCommand ? " ✓ Verification passed." : ""}`, "info");
 				} else {
-					ctx.ui.notify(`❌ B-Thread ${thread.id} ${thread.state}`, "error");
+					const err = thread.tasks[0]?.error ?? "unknown error";
+					ctx.ui.notify(`❌ Z-Thread ${thread.id} failed: ${err.slice(0, 150)}`, "error");
 				}
 			});
 		},
 	});
 
-	/** /lthread — long-running thread */
-	pi.registerCommand("lthread", {
-		description: "Long thread — extended autonomous run. Usage: /lthread <prompt>",
-		handler: async (args, ctx) => {
-			if (!args?.trim()) {
-				ctx.ui.notify("Usage: /lthread <prompt>", "error");
-				return;
-			}
+	// ── /lthread — long-running (native) ─────────────────────────
 
-			const thread = registry.create("long", `Long: ${args.slice(0, 40)}`, [args.trim()], { cwd: ctx.cwd });
+	pi.registerCommand("lthread", {
+		description: "L-Thread: extended autonomous run. Usage: /lthread <prompt>",
+		handler: async (args, ctx) => {
+			if (!args?.trim()) { ctx.ui.notify("Usage: /lthread <prompt>", "error"); return; }
+
+			const thread = registry.create("long", `Long: ${args.slice(0, 40)}`, [args.trim()], {
+				cwd: ctx.cwd,
+				backend: "native",
+			});
 
 			ctx.ui.notify(`🧵 L-Thread ${thread.id}: Extended run starting...`, "info");
 
@@ -373,41 +335,91 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	/** /zthread — zero-touch thread */
-	pi.registerCommand("zthread", {
-		description: 'Zero-touch — autonomous + verify. Usage: /zthread "prompt" --verify "npm test"',
+	// ── /story — STORIES (the unique layer) ──────────────────────
+
+	pi.registerCommand("story", {
+		description: 'Story mode: auto-decompose goal into thread phases. Usage: /story "Add dark mode" [--verify "npm test"]',
 		handler: async (args, ctx) => {
 			if (!args?.trim()) {
-				ctx.ui.notify('Usage: /zthread "prompt" --verify "npm test"', "error");
+				ctx.ui.notify('Usage: /story "goal" [--verify "npm test"]', "error");
 				return;
 			}
 
-			let prompt = args;
-			let verifyCommand: string | undefined;
-
-			const verifyMatch = args.match(/--verify\s+"([^"]+)"|--verify\s+(\S+)/);
+			// Parse verify flag
+			let goal = args;
+			let verify: string | undefined;
+			const verifyMatch = args.match(/--verify\s+"([^"]+)"|--verify\s+'([^']+)'|--verify\s+(\S+)/);
 			if (verifyMatch) {
-				verifyCommand = verifyMatch[1] ?? verifyMatch[2];
-				prompt = prompt.replace(verifyMatch[0], "").trim();
+				verify = verifyMatch[1] ?? verifyMatch[2] ?? verifyMatch[3];
+				goal = goal.replace(verifyMatch[0], "").trim();
+			}
+			goal = goal.replace(/^["']|["']$/g, "").trim();
+
+			const story = registry.createStory(goal, verify);
+
+			// Auto-decompose into phases
+			const phases: StoryPhase[] = [
+				{ name: "scout", threadType: "meta", state: "pending", description: `Research: ${goal}` },
+				{ name: "plan", threadType: "fusion", state: "pending", description: `3 models brainstorm approaches for: ${goal}` },
+				{ name: "decide", threadType: "chained", state: "pending", description: "Human picks the best approach" },
+				{ name: "build", threadType: "parallel", state: "pending", description: `Implement: ${goal}` },
+			];
+
+			if (verify) {
+				phases.push({ name: "verify", threadType: "zero", state: "pending", description: `Verify: ${verify}` });
 			}
 
-			prompt = prompt.replace(/^["']|["']$/g, "").trim();
+			for (const p of phases) {
+				registry.addPhase(story.id, p);
+			}
 
-			const thread = registry.create("zero", `Zero: ${prompt.slice(0, 40)}`, [prompt], { cwd: ctx.cwd });
-			thread.config.verifyCommand = verifyCommand;
+			const phaseNames = phases.map((p) => p.name).join(" → ");
+			ctx.ui.notify(`📖 Story ${story.id}: "${goal.slice(0, 50)}"\n   Phases: ${phaseNames}`, "info");
 
-			ctx.ui.notify(
-				`🧵 Z-Thread ${thread.id}: Zero-touch${verifyCommand ? ` (verify: ${verifyCommand})` : ""}...`,
-				"info"
-			);
+			// Start with the scout phase — send it to the LLM to execute
+			registry.startPhase(story.id, 0, "pending");
 
-			executor.dispatch(thread).then(() => {
-				if (thread.state === "completed") {
-					ctx.ui.notify(`✅ Z-Thread ${thread.id} shipped!${verifyCommand ? " Verification passed." : ""}`, "info");
-				} else {
-					ctx.ui.notify(`❌ Z-Thread ${thread.id} ${thread.state}`, "error");
-				}
-			});
+			// The story orchestration happens via the LLM — we give it the plan
+			const storyPrompt = [
+				`## Story ${story.id}: ${goal}`,
+				"",
+				"Execute this story phase by phase. Use the thread tools.",
+				"",
+				"### Phases:",
+				...phases.map((p, i) => `${i + 1}. **${p.name}** (${p.threadType}): ${p.description}`),
+				"",
+				"### Instructions:",
+				"1. Start with phase 1 (scout) — use `thread_spawn` with type 'meta'",
+				"2. For phase 2 (plan), use `thread_spawn` with type 'fusion' and --models if available",
+				"3. Present the fusion results to the user for phase 3 (decide)",
+				"4. Execute phase 4 (build) based on the chosen approach",
+				verify ? `5. Run verification: \`${verify}\`` : "",
+				"",
+				"Check progress with `thread_status`. Report when done.",
+			].filter(Boolean).join("\n");
+
+			pi.sendUserMessage(storyPrompt, { deliverAs: "followUp" });
+		},
+	});
+
+	// ── /stories — list stories ──────────────────────────────────
+
+	pi.registerCommand("stories", {
+		description: "List all stories",
+		handler: async (_args, ctx) => {
+			const stories = registry.allStories();
+			if (stories.length === 0) {
+				ctx.ui.notify("No stories. Use /story to start one.", "info");
+				return;
+			}
+
+			const lines: string[] = ["📖 Stories", ""];
+			for (const s of stories) {
+				const phases = s.phases.map((p) => `${stateIcon(p.state)}${p.name}`).join(" → ");
+				lines.push(`  ${s.id} [${s.state}] ${s.goal.slice(0, 60)}`);
+				lines.push(`    ${phases}`);
+			}
+			ctx.ui.notify(lines.join("\n"), "info");
 		},
 	});
 
@@ -416,17 +428,26 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "thread_spawn",
 		label: "Thread Spawn",
-		description:
-			"Spawn a thread. Types: parallel (N independent tasks), fusion (same prompt to N agents), chained (sequential phases), meta (scout→plan→build→review), long (extended run), zero (autonomous + verify).",
+		description: [
+			"Spawn a thread. Types:",
+			"- parallel: N independent tasks in parallel (via subagent)",
+			"- chained: sequential phases with checkpoints (via subagent)",
+			"- meta: scout→plan→build→review pipeline (via subagent)",
+			"- fusion: same prompt to N agents/models, compare results (native, UNIQUE)",
+			"- zero: autonomous + verification command gate (native, UNIQUE)",
+			"- long: extended autonomous run (native)",
+		].join("\n"),
 		parameters: Type.Object({
 			type: StringEnum(["parallel", "fusion", "chained", "meta", "long", "zero"] as const),
-			prompts: Type.Array(Type.String(), { description: "Task prompts (for parallel/chained) or single prompt repeated (for fusion)" }),
-			models: Type.Optional(Type.Array(Type.String(), { description: "Models for fusion threads" })),
+			prompts: Type.Array(Type.String(), { description: "Task prompts" }),
+			models: Type.Optional(Type.Array(Type.String(), { description: "Models for fusion (e.g. ['anthropic/claude-sonnet-4', 'google/gemini-2.5-pro'])" })),
 			count: Type.Optional(Type.Number({ description: "Agent count for fusion (default 3)" })),
-			verify: Type.Optional(Type.String({ description: "Verification command for zero-touch threads" })),
+			verify: Type.Optional(Type.String({ description: "Verification command for zero-touch (e.g. 'npm test')" })),
+			agent: Type.Optional(Type.String({ description: "Subagent agent name (default: worker)" })),
+			backend: Type.Optional(StringEnum(["subagent", "native"] as const)),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const { type, prompts, models, count, verify } = params;
+			const { type, prompts, models, count, verify, agent, backend: backendOverride } = params;
 			let taskPrompts = prompts;
 
 			if (type === "fusion") {
@@ -435,26 +456,37 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (type === "meta" && prompts.length === 1) {
-				const p = prompts[0];
-				taskPrompts = [
-					`Research and scout: ${p}`,
-					`Create implementation plan for: ${p}`,
-					`Implement: ${p}`,
-					`Review implementation of: ${p}`,
-				];
+				taskPrompts = [prompts[0]]; // Meta delegates to subagent chain internally
 			}
 
-			const label = type === "fusion" ? `Fusion: ${prompts[0]?.slice(0, 40)}` : `${type}: ${prompts.length} tasks`;
-			const thread = registry.create(type as any, label, taskPrompts, { models, cwd: ctx.cwd });
+			// Auto-select backend
+			const backend = backendOverride ?? (type === "fusion" || type === "zero" || type === "long" ? "native" : "subagent");
 
-			if (verify) thread.config.verifyCommand = verify;
+			const label = type === "fusion"
+				? `Fusion: ${prompts[0]?.slice(0, 40)}`
+				: `${type}: ${taskPrompts.length} tasks`;
 
-			// Dispatch in background
+			const thread = registry.create(type as any, label, taskPrompts, {
+				models,
+				cwd: ctx.cwd,
+				backend,
+				agent,
+				verify,
+			});
+
+			// Dispatch (async — runs in background)
 			executor.dispatch(thread);
 
+			const modelInfo = models ? ` Models: ${models.join(", ")}` : "";
+			const verifyInfo = verify ? ` Verify: ${verify}` : "";
+			const backendInfo = backend === "subagent" ? " (via pi-subagents)" : " (native pi -p)";
+
 			return {
-				content: [{ type: "text", text: `Thread ${thread.id} (${type}) spawned with ${taskPrompts.length} task(s). Use /threads to monitor.` }],
-				details: { threadId: thread.id, type, taskCount: taskPrompts.length },
+				content: [{
+					type: "text",
+					text: `Thread ${thread.id} (${type}) spawned.${backendInfo}${modelInfo}${verifyInfo}\n${taskPrompts.length} task(s). Use /threads or thread_status to monitor.`,
+				}],
+				details: { threadId: thread.id, type, taskCount: taskPrompts.length, backend },
 			};
 		},
 		renderCall(args, theme) {
@@ -462,52 +494,83 @@ export default function (pi: ExtensionAPI) {
 				theme.fg("toolTitle", theme.bold("thread_spawn ")) +
 					theme.fg("accent", args.type) +
 					theme.fg("muted", ` (${args.prompts?.length ?? "?"} tasks)`),
-				0,
-				0
+				0, 0
 			);
-		},
-		renderResult(result, { expanded }, theme) {
-			const text = result.content?.[0]?.type === "text" ? (result.content[0] as any).text : "Thread spawned";
-			return new Text(theme.fg("success", text), 0, 0);
 		},
 	});
 
 	pi.registerTool({
 		name: "thread_status",
 		label: "Thread Status",
-		description: "Get status of all threads or a specific thread by ID",
+		description: "Get status of all threads and stories, or a specific thread/story by ID",
 		parameters: Type.Object({
-			id: Type.Optional(Type.String({ description: "Thread ID (e.g. t-001). Omit for all." })),
+			id: Type.Optional(Type.String({ description: "Thread ID (t-001) or Story ID (s-001). Omit for all." })),
 		}),
 		async execute(_toolCallId, params) {
 			if (params.id) {
+				// Check threads first
 				const t = registry.get(params.id);
-				if (!t) {
-					return { content: [{ type: "text", text: `Thread ${params.id} not found` }], isError: true };
-				}
-				const sum = registry.summarize(t);
-				const taskDetails = t.tasks
-					.map((tk) => `  ${tk.id} [${tk.state}] ${tk.label}${tk.result ? "\n    " + tk.result.slice(0, 200) : ""}`)
-					.join("\n");
-				return {
-					content: [
-						{
+				if (t) {
+					const sum = registry.summarize(t);
+					const taskDetails = t.tasks
+						.map((tk) => {
+							let line = `  ${stateIcon(tk.state)} ${tk.id} [${tk.state}] ${tk.label}`;
+							if (tk.model) line += ` [${tk.model}]`;
+							if (tk.result) line += `\n    ${tk.result.slice(0, 300)}`;
+							if (tk.error) line += `\n    ERROR: ${tk.error.slice(0, 200)}`;
+							return line;
+						})
+						.join("\n");
+					return {
+						content: [{
 							type: "text",
-							text: `Thread ${sum.id} (${sum.type}) — ${sum.state} — ${sum.progress} — ${sum.elapsed}\n${taskDetails}`,
-						},
-					],
-				};
+							text: `Thread ${sum.id} (${sum.type}) [${sum.backend}] — ${sum.state} — ${sum.progress} — ${sum.elapsed}\n${taskDetails}`,
+						}],
+					};
+				}
+
+				// Check stories
+				const s = registry.getStory(params.id);
+				if (s) {
+					const phases = s.phases
+						.map((p) => `  ${stateIcon(p.state)} ${p.name} (${p.threadType}): ${p.description}${p.threadId ? ` [${p.threadId}]` : ""}`)
+						.join("\n");
+					return {
+						content: [{
+							type: "text",
+							text: `Story ${s.id} [${s.state}] — ${s.goal}\n${phases}`,
+						}],
+					};
+				}
+
+				return { content: [{ type: "text", text: `ID ${params.id} not found` }], isError: true };
 			}
 
-			const all = registry.all();
-			if (all.length === 0) {
-				return { content: [{ type: "text", text: "No threads." }] };
+			// All
+			const lines: string[] = [];
+			const stories = registry.allStories();
+			const threads = registry.all();
+
+			if (stories.length > 0) {
+				lines.push("📖 Stories:");
+				for (const s of stories) {
+					const phases = s.phases.map((p) => `${stateIcon(p.state)}${p.name}`).join("→");
+					lines.push(`  ${s.id} [${s.state}] ${s.goal.slice(0, 50)} — ${phases}`);
+				}
 			}
 
-			const lines = all.map((t) => {
-				const s = registry.summarize(t);
-				return `${s.id} [${s.type}] ${s.state} ${s.progress} (${s.elapsed}) — ${s.label}`;
-			});
+			if (threads.length > 0) {
+				lines.push("🧵 Threads:");
+				for (const t of threads) {
+					const s = registry.summarize(t);
+					lines.push(`  ${s.id} ${typeIcon(s.type)} ${s.type} [${s.state}] ${s.progress} (${s.elapsed}) [${s.backend}] — ${s.label}`);
+				}
+			}
+
+			if (lines.length === 0) {
+				return { content: [{ type: "text", text: "No threads or stories." }] };
+			}
+
 			return { content: [{ type: "text", text: lines.join("\n") }] };
 		},
 	});

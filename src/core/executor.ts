@@ -3,10 +3,11 @@ import type { ThreadRegistry } from "./registry.js";
 import type { Thread, ThreadTask } from "./types.js";
 
 /**
- * Executor — spawns agents for thread tasks.
+ * Executor — runs thread tasks.
  *
- * Uses pi.exec() to dispatch `pi` subprocesses in the background.
- * Each task gets its own pi instance running with -p (print mode).
+ * Two backends:
+ * - "subagent": delegates to pi-subagents via sendUserMessage (inherits agent specialization, TUI, artifacts)
+ * - "native": spawns pi -p directly (for fusion/zero where we need raw control)
  */
 export class ThreadExecutor {
 	constructor(
@@ -14,20 +15,19 @@ export class ThreadExecutor {
 		private registry: ThreadRegistry
 	) {}
 
-	/** Run a single task via pi print mode */
-	private async runTask(thread: Thread, task: ThreadTask): Promise<void> {
+	// ── Native execution (pi -p) ────────────────────────────────
+
+	private async runTaskNative(thread: Thread, task: ThreadTask): Promise<void> {
 		const cwd = thread.config.cwd ?? process.cwd();
 		this.registry.startTask(thread.id, task.id);
 
 		try {
 			const args = ["-p", task.prompt];
-			if (task.model) {
-				args.unshift("-m", task.model);
-			}
+			if (task.model) args.unshift("-m", task.model);
 
 			const result = await this.pi.exec("pi", args, {
 				cwd,
-				timeout: 10 * 60 * 1000, // 10 min default
+				timeout: 10 * 60 * 1000,
 			});
 
 			if (result.code === 0) {
@@ -40,143 +40,161 @@ export class ThreadExecutor {
 		}
 	}
 
-	/** Execute a base thread — single task */
-	async execBase(thread: Thread): Promise<void> {
-		this.registry.startThread(thread.id);
-		await this.runTask(thread, thread.tasks[0]);
-	}
+	// ── Subagent execution (via sendUserMessage) ────────────────
 
-	/** Stagger launches to avoid OAuth lockfile races */
-	private async staggeredAll(thread: Thread, tasks: ThreadTask[], delayMs = 500): Promise<void> {
-		const promises: Promise<void>[] = [];
-		for (let i = 0; i < tasks.length; i++) {
-			if (i > 0) await new Promise((r) => setTimeout(r, delayMs));
-			promises.push(this.runTask(thread, tasks[i]));
+	private launchSubagentParallel(thread: Thread): void {
+		const agent = thread.config.agent ?? "worker";
+		const tasks = thread.tasks.map((t) => ({
+			agent,
+			task: t.prompt,
+			...(t.model ? { model: t.model } : {}),
+		}));
+
+		// Send as a user message that pi-subagents will pick up
+		this.pi.sendUserMessage(
+			`Run these tasks in parallel using subagent:\n\`\`\`json\n${JSON.stringify({ tasks }, null, 2)}\n\`\`\``,
+			{ deliverAs: "followUp" }
+		);
+
+		// Mark all tasks as running (subagent handles the rest)
+		this.registry.startThread(thread.id);
+		for (const task of thread.tasks) {
+			this.registry.startTask(thread.id, task.id);
 		}
-		await Promise.allSettled(promises);
 	}
 
-	/** Execute a parallel thread — all tasks concurrently (staggered) */
-	async execParallel(thread: Thread): Promise<void> {
+	private launchSubagentChain(thread: Thread): void {
+		const agent = thread.config.agent ?? "worker";
+		const chain = thread.tasks.map((t, i) => ({
+			agent,
+			task: i === 0 ? t.prompt : `Continue: ${t.prompt}. Previous context: {previous}`,
+			...(t.model ? { model: t.model } : {}),
+		}));
+
+		this.pi.sendUserMessage(
+			`Run this chain using subagent:\n\`\`\`json\n${JSON.stringify({ chain }, null, 2)}\n\`\`\``,
+			{ deliverAs: "followUp" }
+		);
+
 		this.registry.startThread(thread.id);
-		await this.staggeredAll(thread, thread.tasks);
+		this.registry.startTask(thread.id, thread.tasks[0].id);
 	}
 
-	/** Execute a fusion thread — same prompt to N agents (staggered) */
+	private launchSubagentMeta(thread: Thread): void {
+		const chain = [
+			{ agent: "scout", task: thread.tasks[0]?.prompt ?? "Scout the codebase" },
+			{ agent: "planner", task: "{previous}" },
+			{ agent: "worker", task: "{previous}" },
+			{ agent: "reviewer", task: "{previous}" },
+		];
+
+		this.pi.sendUserMessage(
+			`Run this meta pipeline using subagent:\n\`\`\`json\n${JSON.stringify({ chain }, null, 2)}\n\`\`\``,
+			{ deliverAs: "followUp" }
+		);
+
+		this.registry.startThread(thread.id);
+		this.registry.startTask(thread.id, thread.tasks[0].id);
+	}
+
+	// ── Fusion (native, multi-model) ────────────────────────────
+
 	async execFusion(thread: Thread): Promise<void> {
 		this.registry.startThread(thread.id);
-		await this.staggeredAll(thread, thread.tasks);
+		// All tasks run in parallel with potentially different models
+		await Promise.allSettled(thread.tasks.map((task) => this.runTaskNative(thread, task)));
 	}
 
-	/** Execute a chained thread — sequential with optional checkpoints */
-	async execChained(thread: Thread, onCheckpoint?: (phase: number, task: ThreadTask) => Promise<boolean>): Promise<void> {
-		this.registry.startThread(thread.id);
+	// ── Zero-touch (native + verification) ──────────────────────
 
-		for (let i = 0; i < thread.tasks.length; i++) {
-			const task = thread.tasks[i];
-
-			// Checkpoint before each phase (except first)
-			if (i > 0 && onCheckpoint) {
-				const proceed = await onCheckpoint(i, task);
-				if (!proceed) {
-					this.registry.kill(thread.id);
-					return;
-				}
-			}
-
-			await this.runTask(thread, task);
-
-			// Stop if task failed
-			if (task.state === "failed") return;
-		}
-	}
-
-	/** Execute a long thread — same as base but with longer timeout */
-	async execLong(thread: Thread): Promise<void> {
-		this.registry.startThread(thread.id);
-		// Override timeout for long threads
-		const task = thread.tasks[0];
-		const cwd = thread.config.cwd ?? process.cwd();
-		this.registry.startTask(thread.id, task.id);
-
-		try {
-			const args = ["-p", task.prompt];
-			if (task.model) args.unshift("-m", task.model);
-
-			const timeout = thread.config.checkpointInterval ?? 60 * 60 * 1000; // 1 hour default
-			const result = await this.pi.exec("pi", args, { cwd, timeout });
-
-			if (result.code === 0) {
-				this.registry.completeTask(thread.id, task.id, result.stdout);
-			} else {
-				this.registry.failTask(thread.id, task.id, result.stderr || `Exit code: ${result.code}`);
-			}
-		} catch (err: any) {
-			this.registry.failTask(thread.id, task.id, err.message ?? String(err));
-		}
-	}
-
-	/** Execute a zero-touch thread — run + verify */
 	async execZero(thread: Thread): Promise<void> {
 		this.registry.startThread(thread.id);
 		const task = thread.tasks[0];
-		const cwd = thread.config.cwd ?? process.cwd();
-		this.registry.startTask(thread.id, task.id);
+		await this.runTaskNative(thread, task);
 
-		try {
-			// Run the main task
-			const args = ["-p", task.prompt];
-			if (task.model) args.unshift("-m", task.model);
-
-			const result = await this.pi.exec("pi", args, { cwd, timeout: 30 * 60 * 1000 });
-
-			if (result.code !== 0) {
-				this.registry.failTask(thread.id, task.id, result.stderr || `Exit code: ${result.code}`);
-				return;
-			}
-
-			// Run verification if configured
-			if (thread.config.verifyCommand) {
-				const verify = await this.pi.exec("bash", ["-c", thread.config.verifyCommand], { cwd, timeout: 5 * 60 * 1000 });
+		// If task succeeded and we have a verify command, run it
+		if (task.state === "completed" && thread.config.verifyCommand) {
+			const cwd = thread.config.cwd ?? process.cwd();
+			try {
+				const verify = await this.pi.exec("bash", ["-c", thread.config.verifyCommand], {
+					cwd,
+					timeout: 5 * 60 * 1000,
+				});
 				if (verify.code !== 0) {
-					this.registry.failTask(thread.id, task.id, `Verification failed: ${verify.stderr || verify.stdout}`);
-					return;
+					// Override the completed state to failed
+					task.state = "failed";
+					task.error = `Verification failed (${thread.config.verifyCommand}): ${verify.stderr || verify.stdout}`;
+					thread.state = "failed";
+					thread.completedAt = Date.now();
+					thread.duration = thread.completedAt - (thread.startedAt ?? thread.createdAt);
 				}
+			} catch (err: any) {
+				task.state = "failed";
+				task.error = `Verification error: ${err.message}`;
+				thread.state = "failed";
+				thread.completedAt = Date.now();
 			}
-
-			this.registry.completeTask(thread.id, task.id, result.stdout);
-		} catch (err: any) {
-			this.registry.failTask(thread.id, task.id, err.message ?? String(err));
 		}
 	}
 
-	/** Execute a meta thread — decompose into sub-threads */
-	async execMeta(thread: Thread): Promise<void> {
-		this.registry.startThread(thread.id);
-		// Meta threads run tasks sequentially: scout → plan → build → review
-		for (const task of thread.tasks) {
-			await this.runTask(thread, task);
-			if (task.state === "failed") return;
-		}
-	}
+	// ── Dispatch ─────────────────────────────────────────────────
 
-	/** Dispatch a thread based on its type */
-	async dispatch(thread: Thread, opts?: { onCheckpoint?: (phase: number, task: ThreadTask) => Promise<boolean> }): Promise<void> {
+	async dispatch(
+		thread: Thread,
+		opts?: { onCheckpoint?: (phase: number, task: ThreadTask) => Promise<boolean> }
+	): Promise<void> {
+		const backend = thread.config.backend;
+
+		if (backend === "subagent") {
+			switch (thread.type) {
+				case "parallel":
+					return this.launchSubagentParallel(thread);
+				case "chained":
+					return this.launchSubagentChain(thread);
+				case "meta":
+					return this.launchSubagentMeta(thread);
+				default:
+					// Fall through to native for unsupported subagent types
+					break;
+			}
+		}
+
+		// Native execution
 		switch (thread.type) {
 			case "base":
-				return this.execBase(thread);
+			case "long":
+				this.registry.startThread(thread.id);
+				return this.runTaskNative(thread, thread.tasks[0]);
 			case "parallel":
-				return this.execParallel(thread);
+				this.registry.startThread(thread.id);
+				await Promise.allSettled(thread.tasks.map((t) => this.runTaskNative(thread, t)));
+				return;
 			case "fusion":
 				return this.execFusion(thread);
-			case "chained":
-				return this.execChained(thread, opts?.onCheckpoint);
-			case "long":
-				return this.execLong(thread);
 			case "zero":
 				return this.execZero(thread);
+			case "chained": {
+				this.registry.startThread(thread.id);
+				for (let i = 0; i < thread.tasks.length; i++) {
+					if (i > 0 && opts?.onCheckpoint) {
+						const proceed = await opts.onCheckpoint(i, thread.tasks[i]);
+						if (!proceed) {
+							this.registry.kill(thread.id);
+							return;
+						}
+					}
+					await this.runTaskNative(thread, thread.tasks[i]);
+					if (thread.tasks[i].state === "failed") return;
+				}
+				return;
+			}
 			case "meta":
-				return this.execMeta(thread);
+				this.registry.startThread(thread.id);
+				for (const task of thread.tasks) {
+					await this.runTaskNative(thread, task);
+					if (task.state === "failed") return;
+				}
+				return;
 		}
 	}
 }
