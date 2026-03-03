@@ -38,6 +38,6 @@ src/core/executor.ts    — Dual backend: subagent delegation + native pi -p
 - [x] Phase 4: Subagent integration for P/C/B threads
 - [x] Phase 5: Fusion with multi-model support
 - [x] Phase 6: Zero-touch with verify gate
-- [ ] Phase 7: Dashboard as TUI custom component
-- [ ] Phase 8: Session persistence (appendEntry)
+- [x] Phase 7: Dashboard as TUI custom component (Ctrl+Shift+T)
+- [x] Phase 8: Session persistence (appendEntry + restore)
 - [ ] Phase 9: npm publish
