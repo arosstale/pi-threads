@@ -209,6 +209,16 @@ export class ThreadRegistry {
 		}
 	}
 
+	/** Restore state from session persistence */
+	restore(threads: Thread[], stories: Story[]) {
+		for (const t of threads) {
+			this.threads.set(t.id, t);
+		}
+		for (const s of stories) {
+			this.stories.set(s.id, s);
+		}
+	}
+
 	// ── Stories ──────────────────────────────────────────────────
 
 	createStory(goal: string, verify?: string): Story {

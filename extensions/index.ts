@@ -4,11 +4,43 @@ import { StringEnum } from "@mariozechner/pi-ai";
 import { Text } from "@mariozechner/pi-tui";
 import { ThreadRegistry, formatElapsed } from "../src/core/registry.js";
 import { ThreadExecutor } from "../src/core/executor.js";
+import { createDashboard } from "../src/dashboard.js";
 import type { Thread, ThreadType, Story, StoryPhase } from "../src/core/types.js";
 
 export default function (pi: ExtensionAPI) {
 	const registry = new ThreadRegistry();
 	const executor = new ThreadExecutor(pi, registry);
+
+	// ── Session persistence ──────────────────────────────────────
+	// Persist thread/story state so it survives compaction and /fork
+
+	function persistState() {
+		const threads = registry.all().filter((t) => t.state !== "killed");
+		const stories = registry.allStories();
+		if (threads.length > 0 || stories.length > 0) {
+			pi.appendEntry("pi-threads-state", { threads, stories, timestamp: Date.now() });
+		}
+	}
+
+	// Save state on thread events
+	registry.on((event) => {
+		if (event.type === "thread_completed" || event.type === "thread_failed" ||
+			event.type === "story_completed" || event.type === "story_failed") {
+			persistState();
+		}
+	});
+
+	// Restore state on session start
+	pi.on("session_start", async (_event, ctx) => {
+		for (const entry of ctx.sessionManager.getEntries()) {
+			if (entry.type === "custom" && entry.customType === "pi-threads-state") {
+				const data = entry.data as any;
+				if (data?.threads) {
+					registry.restore(data.threads, data.stories ?? []);
+				}
+			}
+		}
+	});
 
 	// ── Status bar ───────────────────────────────────────────────
 
@@ -32,6 +64,16 @@ export default function (pi: ExtensionAPI) {
 
 			ctx.ui.setStatus("pi-threads", parts.length > 0 ? parts.join(" ") : undefined);
 		});
+	});
+
+	// ── Keyboard shortcut ────────────────────────────────────────
+
+	pi.registerShortcut("ctrl+shift+t", {
+		description: "Open thread dashboard",
+		handler: async (ctx) => {
+			// Trigger the /threads command
+			pi.sendUserMessage("/threads", { deliverAs: "followUp" });
+		},
 	});
 
 	// ── Helpers ──────────────────────────────────────────────────
@@ -82,47 +124,15 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	// ── /threads — unified dashboard ─────────────────────────────
+	// ── /threads — unified TUI dashboard ─────────────────────────
 
 	pi.registerCommand("threads", {
-		description: "Thread dashboard — show/manage all threads and stories",
+		description: "Thread dashboard — interactive TUI to view/manage threads and stories",
 		handler: async (args, ctx) => {
 			const subcmd = args?.trim().split(/\s+/)[0] ?? "";
 			const rest = args?.trim().slice(subcmd.length).trim() ?? "";
 
-			if (!subcmd || subcmd === "status") {
-				const threads = registry.all();
-				const stories = registry.allStories();
-
-				if (threads.length === 0 && stories.length === 0) {
-					ctx.ui.notify("No active threads or stories. Commands: /pthread /fthread /cthread /bthread /zthread /story", "info");
-					return;
-				}
-
-				const lines: string[] = ["🧵 Thread Dashboard", ""];
-
-				if (stories.length > 0) {
-					lines.push("📖 Stories:");
-					for (const s of stories) {
-						const phases = s.phases.map((p) => `${stateIcon(p.state)}${p.name}`).join(" → ");
-						lines.push(`  ${s.id} [${s.state}] ${s.goal.slice(0, 50)} — ${phases || "(planning...)"}`);
-					}
-					lines.push("");
-				}
-
-				if (threads.length > 0) {
-					lines.push("🧵 Threads:");
-					for (const t of threads) {
-						const s = registry.summarize(t);
-						const be = s.backend === "subagent" ? " [sub]" : "";
-						lines.push(`  ${s.id} ${typeIcon(s.type)} ${s.type} [${s.state}] ${s.progress} (${s.elapsed})${be} — ${s.label}`);
-					}
-				}
-
-				ctx.ui.notify(lines.join("\n"), "info");
-				return;
-			}
-
+			// Quick subcommands (no TUI)
 			if (subcmd === "kill" && rest) {
 				const t = registry.get(rest);
 				if (!t) { ctx.ui.notify(`Thread ${rest} not found`, "error"); return; }
@@ -130,22 +140,37 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`Killed ${rest}`, "warning");
 				return;
 			}
-
 			if (subcmd === "prune") {
 				registry.prune();
 				ctx.ui.notify("Pruned finished threads", "info");
 				return;
 			}
-
+			if (subcmd === "status") {
+				// Quick text status (no TUI)
+				const threads = registry.all();
+				const stories = registry.allStories();
+				if (threads.length === 0 && stories.length === 0) {
+					ctx.ui.notify("No active threads or stories.", "info");
+					return;
+				}
+				const lines: string[] = [];
+				for (const s of stories) {
+					const phases = s.phases.map((p) => `${stateIcon(p.state)}${p.name}`).join("→");
+					lines.push(`📖 ${s.id} [${s.state}] ${s.goal.slice(0, 50)} — ${phases}`);
+				}
+				for (const t of threads) {
+					const sum = registry.summarize(t);
+					lines.push(`🧵 ${sum.id} ${sum.type} [${sum.state}] ${sum.progress} (${sum.elapsed}) — ${sum.label}`);
+				}
+				ctx.ui.notify(lines.join("\n"), "info");
+				return;
+			}
 			if (subcmd === "review") {
 				const completed = registry.byState("completed");
 				if (completed.length === 0) { ctx.ui.notify("No completed threads to review", "info"); return; }
-
 				for (const t of completed) {
 					const lines: string[] = [`── Thread ${t.id} (${t.type}) ──`];
-
 					if (t.type === "fusion") {
-						// Fusion review: show all results side by side for comparison
 						lines.push("Fusion results — compare and pick the best:\n");
 						for (const tk of t.tasks) {
 							const modelTag = tk.model ? ` [${tk.model}]` : "";
@@ -160,13 +185,37 @@ export default function (pi: ExtensionAPI) {
 							if (tk.error) lines.push(`    ERROR: ${tk.error.slice(0, 200)}`);
 						}
 					}
-
 					ctx.ui.notify(lines.join("\n"), "info");
 				}
 				return;
 			}
 
-			ctx.ui.notify(`Unknown: ${subcmd}. Use: status, kill <id>, review, prune`, "error");
+			// Default: open interactive TUI dashboard
+			await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+				const dashboard = createDashboard(
+					registry,
+					theme,
+					() => done(),
+					(id) => {
+						registry.kill(id);
+						ctx.ui.notify(`Killed ${id}`, "warning");
+						tui.requestRender();
+					},
+					(id) => {
+						const t = registry.get(id);
+						if (t) {
+							const preview = t.tasks.map((tk) => `${tk.id}: ${tk.result?.slice(0, 100) ?? tk.error ?? "(pending)"}`).join("\n");
+							ctx.ui.notify(`Thread ${id} results:\n${preview}`, "info");
+						}
+					}
+				);
+
+				return {
+					render: (w: number) => dashboard.render(w),
+					invalidate: () => dashboard.invalidate(),
+					handleInput: (data: string) => { dashboard.handleInput(data); tui.requestRender(); },
+				};
+			});
 		},
 	});
 
