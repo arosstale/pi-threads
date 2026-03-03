@@ -1,0 +1,15 @@
+{
+  "name": "pi-threads",
+  "version": "0.1.0",
+  "description": "Thread engineering for pi — P-threads, C-threads, F-threads, and more",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extensions/index.ts"]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  }
+}
