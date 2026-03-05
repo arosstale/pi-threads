@@ -34,7 +34,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		for (const entry of ctx.sessionManager.getEntries()) {
 			if (entry.type === "custom" && entry.customType === "pi-threads-state") {
-				const data = entry.data as any;
+				const data = entry.data as { threads?: Thread[]; stories?: Story[]; timestamp?: number };
 				if (data?.threads) {
 					registry.restore(data.threads, data.stories ?? []);
 				}
@@ -511,7 +511,7 @@ export default function (pi: ExtensionAPI) {
 				? `Fusion: ${prompts[0]?.slice(0, 40)}`
 				: `${type}: ${taskPrompts.length} tasks`;
 
-			const thread = registry.create(type as any, label, taskPrompts, {
+			const thread = registry.create(type as ThreadType, label, taskPrompts, {
 				models,
 				cwd: ctx.cwd,
 				backend,

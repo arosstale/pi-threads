@@ -47,7 +47,9 @@ export class ThreadRegistry {
 		for (const h of this.handlers) {
 			try {
 				h(event);
-			} catch {}
+			} catch (e) {
+				console.error("[pi-threads] event handler error:", e);
+			}
 		}
 	}
 
