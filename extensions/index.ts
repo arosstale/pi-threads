@@ -99,15 +99,6 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	function stateColor(state: string): string {
-		switch (state) {
-			case "running": return "warning";
-			case "completed": return "success";
-			case "failed": case "killed": return "error";
-			default: return "muted";
-		}
-	}
-
 	function typeIcon(type: string): string {
 		switch (type) {
 			case "parallel": return "⫘";
