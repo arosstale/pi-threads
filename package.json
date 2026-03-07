@@ -1,6 +1,6 @@
 {
   "name": "pi-thread-engine",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Thread engineering for pi — all 7 thread types, stories, fusion, zero-touch, TUI dashboard",
   "type": "module",
   "license": "MIT",
