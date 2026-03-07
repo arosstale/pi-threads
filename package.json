@@ -21,6 +21,22 @@
   "pi": {
     "extensions": [
       "./extensions/index.ts"
+    ],
+    "commands": [
+      "threads",
+      "pthread",
+      "cthread",
+      "bthread",
+      "fthread",
+      "zthread",
+      "lthread",
+      "story",
+      "stories"
+    ],
+    "tools": [
+      "thread_spawn",
+      "thread_status",
+      "thread_kill"
     ]
   },
   "files": [
